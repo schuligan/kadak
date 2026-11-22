@@ -30,6 +30,7 @@ def make_clips(source, out_dir, count=5, min_len=20, max_len=50, layout="face", 
 
 
 fake.KadakError, fake.make_clips = KadakError, make_clips
+real = sys.modules.get("kadak")
 sys.modules["kadak"] = fake
 
 with socket.socket() as s:
@@ -37,6 +38,12 @@ with socket.socket() as s:
     PORT = s.getsockname()[1]
 os.environ.update(KADAK_PORT=str(PORT), KADAK_DATA=tempfile.mkdtemp(), KADAK_NO_BROWSER="1")
 import server  # noqa: E402
+
+# server keeps the stand-in; put the real engine back so test_kadak still tests the real one in the same run.
+if real:
+    sys.modules["kadak"] = real
+else:
+    del sys.modules["kadak"]
 
 BASE = f"http://127.0.0.1:{PORT}"
 

@@ -21,8 +21,8 @@ class TestKadak(unittest.TestCase):
         for model in ("/x/ggml-base.en.bin", "/x/ggml-base.en-q5_1.bin"):
             said, out = [], Path(tempfile.mkdtemp())
             with mock.patch.dict(os.environ, {"KADAK_WHISPER_MODEL": model}), \
-                    mock.patch("kadak.shutil.which", return_value="/x/whisper-cli"), \
-                    mock.patch("kadak.stream", side_effect=AssertionError("Whisper ran")) as run:
+                    mock.patch.object(kadak.shutil, "which", return_value="/x/whisper-cli"), \
+                    mock.patch.object(kadak, "stream", side_effect=AssertionError("Whisper ran")) as run:
                 self.assertEqual(kadak.whisper_words(out / "a.wav", out, lambda *a: said.append(a[2]), "hi"), [])
                 run.assert_not_called()
             self.assertIn("'hi'", said[-1])
@@ -30,8 +30,8 @@ class TestKadak(unittest.TestCase):
     def test_multilingual_whisper_model_is_told_the_language(self):
         out = Path(tempfile.mkdtemp())
         with mock.patch.dict(os.environ, {"KADAK_WHISPER_MODEL": "/x/ggml-base.bin"}), \
-                mock.patch("kadak.shutil.which", return_value="/x/whisper-cli"), \
-                mock.patch("kadak.stream", return_value=(0, [])) as run:
+                mock.patch.object(kadak.shutil, "which", return_value="/x/whisper-cli"), \
+                mock.patch.object(kadak, "stream", return_value=(0, [])) as run:
             kadak.whisper_words(out / "a.wav", out, lambda *a: None, "hi")
             kadak.whisper_words(out / "a.wav", out, lambda *a: None, None)
         cmds = [c.args[0] for c in run.call_args_list]
@@ -39,14 +39,14 @@ class TestKadak(unittest.TestCase):
         self.assertEqual(cmds[1][cmds[1].index("-l") + 1], "auto")
 
     def test_captions_ask_original_language_first_and_skip_refusals(self):
-        with mock.patch("kadak.subprocess.run") as run:
+        with mock.patch.object(kadak.subprocess, "run") as run:
             kadak.fetch_captions("https://example.com/v", Path(tempfile.mkdtemp()))
         cmd = run.call_args.args[0]
         self.assertIn("--ignore-errors", cmd)
         self.assertTrue(cmd[cmd.index("--sub-langs") + 1].startswith("en-orig,hi-orig,"))
 
     def test_clips_get_even_loudness(self):
-        with mock.patch("kadak.subprocess.run", return_value=mock.Mock(returncode=0)) as run:
+        with mock.patch.object(kadak.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
             kadak.render("ffmpeg", "src.mp4", 0, 30, "[0:v]null[v]", ".", "kadak_01.mp4")
         cmd = run.call_args.args[0]
         af = cmd[cmd.index("-af") + 1]
