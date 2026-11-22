@@ -210,7 +210,7 @@ h2{margin:0;font:400 38px var(--display);letter-spacing:.02em;text-transform:upp
 
 <script>
 const $ = (id) => document.getElementById(id);
-let layout = "face", jobId = null, timer = null, seenFound = 0, seenClips = 0;
+let layout = "face", jobId = null, timer = null, seenFound = 0, seenClips = 0, startedAt = 0;
 
 document.querySelectorAll(".chip").forEach((chip) => chip.addEventListener("click", () => {
   layout = chip.dataset.layout;
@@ -242,7 +242,7 @@ $("form").addEventListener("submit", async (e) => {
 });
 
 function start(id) {
-  jobId = id; seenFound = 0; seenClips = 0;
+  jobId = id; seenFound = 0; seenClips = 0; startedAt = Date.now();
   $("pills").innerHTML = ""; $("grid").innerHTML = "";
   show($("form"), false); show($("ready"), false); showError($("jobErr"), "");
   show($("scan"), true); show($("empty"), true);
@@ -261,7 +261,8 @@ async function poll() {
     return showError($("jobErr"), "Kadak lost track of that job (was it restarted?). Press Find clips to start again.");
   }
   $("scanTitle").textContent = job.title ? `SCANNING “${job.title}”` : "GETTING THE VIDEO";
-  $("pctText").textContent = `${job.pct || 0}%`;
+  const secs = Math.floor((Date.now() - startedAt) / 1000);
+  $("pctText").textContent = `${job.pct || 0}% · ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
   $("bar").style.width = `${job.pct || 0}%`;
   $("bar").parentElement.setAttribute("aria-valuenow", job.pct || 0);
   $("stageText").textContent = job.text || "";

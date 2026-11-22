@@ -118,17 +118,20 @@ def probe(ffprobe, path):
 
 # ---------- download ----------
 
-def download(url, out, section, ffmpeg, say):
+def download(url, out, section, ffmpeg, say, emit):
     if not shutil.which("yt-dlp"):
         raise KadakError("yt-dlp is not installed. Install it with: brew install yt-dlp")
     title = []
 
     def on_line(line):
+        # ponytail: a section is fetched by FFmpeg inside yt-dlp, which reports no percentage until the end;
+        # the page shows a running timer instead.
         m = re.match(r"\[download\]\s+([\d.]+)%", line)
         if m:
             say("download", int(float(m.group(1)) * 0.3), f"Downloading the video ({float(m.group(1)):.0f}%)")
         elif line.startswith("KADAK_TITLE "):
             title.append(line[12:])
+            emit({"title": line[12:]})
     # ponytail: downloads the whole video (or the whole section); live streams must have ended.
     # YouTube sometimes blocks a connection's default client ("confirm you're not a bot");
     # other clients often still work, so try them in turn before giving up.
@@ -523,7 +526,7 @@ def _make_clips(source, out_dir, count, min_len, max_len, layout, section, progr
         say("download", 0, "Captions off: install ffmpeg-full")
     caps = None
     if is_url:
-        src, title, client = download(source.strip(), out, section, ffmpeg, say)
+        src, title, client = download(source.strip(), out, section, ffmpeg, say, emit)
         off = 0.0
         caps = fetch_captions(source.strip(), out, client)
     else:
