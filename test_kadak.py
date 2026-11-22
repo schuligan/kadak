@@ -1,9 +1,58 @@
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import kadak
 
 
 class TestKadak(unittest.TestCase):
+    def test_whisper_sound_notes_are_dropped(self):
+        segs = ["(upbeat", "music)", "No", "way", "[laughs]", "bro", "*sighs*", "(Music)", "okay"]
+        data = {"transcription": [{"text": t, "offsets": {"from": i * 500, "to": i * 500 + 400}}
+                                  for i, t in enumerate(segs)]}
+        self.assertEqual([w for _, _, w in kadak.whisper_json_words(data)], ["No", "way", "bro", "okay"])
+        unclosed = {"transcription": [{"text": t, "offsets": {"from": i * 500, "to": i * 500 + 400}}
+                                      for i, t in enumerate(["(upbeat", "No", "way"])]}
+        self.assertEqual([w for _, _, w in kadak.whisper_json_words(unclosed)], ["No", "way"])
+
+    def test_english_whisper_model_is_not_used_on_other_languages(self):
+        for model in ("/x/ggml-base.en.bin", "/x/ggml-base.en-q5_1.bin"):
+            said, out = [], Path(tempfile.mkdtemp())
+            with mock.patch.dict(os.environ, {"KADAK_WHISPER_MODEL": model}), \
+                    mock.patch("kadak.shutil.which", return_value="/x/whisper-cli"), \
+                    mock.patch("kadak.stream", side_effect=AssertionError("Whisper ran")) as run:
+                self.assertEqual(kadak.whisper_words(out / "a.wav", out, lambda *a: said.append(a[2]), "hi"), [])
+                run.assert_not_called()
+            self.assertIn("'hi'", said[-1])
+
+    def test_multilingual_whisper_model_is_told_the_language(self):
+        out = Path(tempfile.mkdtemp())
+        with mock.patch.dict(os.environ, {"KADAK_WHISPER_MODEL": "/x/ggml-base.bin"}), \
+                mock.patch("kadak.shutil.which", return_value="/x/whisper-cli"), \
+                mock.patch("kadak.stream", return_value=(0, [])) as run:
+            kadak.whisper_words(out / "a.wav", out, lambda *a: None, "hi")
+            kadak.whisper_words(out / "a.wav", out, lambda *a: None, None)
+        cmds = [c.args[0] for c in run.call_args_list]
+        self.assertEqual(cmds[0][cmds[0].index("-l") + 1], "hi")
+        self.assertEqual(cmds[1][cmds[1].index("-l") + 1], "auto")
+
+    def test_captions_ask_original_language_first_and_skip_refusals(self):
+        with mock.patch("kadak.subprocess.run") as run:
+            kadak.fetch_captions("https://example.com/v", Path(tempfile.mkdtemp()))
+        cmd = run.call_args.args[0]
+        self.assertIn("--ignore-errors", cmd)
+        self.assertTrue(cmd[cmd.index("--sub-langs") + 1].startswith("en-orig,hi-orig,"))
+
+    def test_clips_get_even_loudness(self):
+        with mock.patch("kadak.subprocess.run", return_value=mock.Mock(returncode=0)) as run:
+            kadak.render("ffmpeg", "src.mp4", 0, 30, "[0:v]null[v]", ".", "kadak_01.mp4")
+        cmd = run.call_args.args[0]
+        af = cmd[cmd.index("-af") + 1]
+        self.assertTrue(af.startswith("loudnorm") and "I=-14" in af and "TP=-1.5" in af, af)
+        self.assertEqual(cmd[cmd.index("-ar") + 1], "48000")
+
     def test_caption_markup_is_dropped(self):
         words = [kadak.clean_word(t) for t in "] >> Oh my god. [Music] [ __ ] Rose".split()]
         self.assertEqual([w for w in words if w], ["Oh", "my", "god.", "Rose"])
@@ -51,7 +100,13 @@ class TestKadak(unittest.TestCase):
         out = kadak.translit("पुलिस आ गयी, भागो!")
         self.assertTrue(out.isascii())
         self.assertTrue(out.startswith("pul"))
-        self.assertIn("bhaago", out)
+        self.assertIn("bhago", out)
+        self.assertEqual(kadak.translit("भाई क्या हुआ नहीं मर गया"), "bhai kya hua nahin mar gaya")
+
+    def test_hindi_captions_count_as_hype_words(self):
+        words = [(i, i + 0.5, kadak.clean_word(t)) for i, t in enumerate("अरे भाई क्या मर गया".split())]
+        hype, per = kadak.hype_hits(words, 6)
+        self.assertEqual(sorted(w for sec in per for w in sec), ["bhai", "kya", "mar gaya"])
 
     def test_pick_moments(self):
         scores = [0.0] * 600

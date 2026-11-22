@@ -121,7 +121,7 @@ def probe(ffprobe, path):
 def download(url, out, section, ffmpeg, say, emit):
     if not shutil.which("yt-dlp"):
         raise KadakError("yt-dlp is not installed. Install it with: brew install yt-dlp")
-    title = []
+    title, lang = [], []
 
     def on_line(line):
         # ponytail: a section is fetched by FFmpeg inside yt-dlp, which reports no percentage until the end;
@@ -132,12 +132,15 @@ def download(url, out, section, ffmpeg, say, emit):
         elif line.startswith("KADAK_TITLE "):
             title.append(line[12:])
             emit({"title": line[12:]})
+        elif line.startswith("KADAK_LANG "):
+            lang.append(line[11:].strip())
     # ponytail: downloads the whole video (or the whole section); live streams must have ended.
     # YouTube sometimes blocks a connection's default client ("confirm you're not a bot");
     # other clients often still work, so try them in turn before giving up.
     for client in YT_CLIENTS:
         cmd = ["yt-dlp", "-f", YTDLP_FORMAT, "--merge-output-format", "mp4", "--no-playlist", "--newline", "--force-overwrites",
                "--progress", "--no-simulate", "--print", "before_dl:KADAK_TITLE %(title)s",
+               "--print", "before_dl:KADAK_LANG %(language)s",
                "--ffmpeg-location", str(Path(ffmpeg).parent), "-o", str(out / "source.%(ext)s"), *client_args(client),
                "--", url]
         if section:
@@ -147,7 +150,8 @@ def download(url, out, section, ffmpeg, say, emit):
         if not media.exists():
             media = next((p for p in sorted(out.glob("source.*")) if p.suffix in (".mp4", ".mkv", ".webm")), None)
         if not code and media:
-            return media, (title[0] if title else media.stem), client
+            known = lang and lang[0] not in ("NA", "none", "", "und")
+            return media, (title[0] if title else media.stem), client, (lang[0] if known else None)
         err = next((l for l in reversed(tail) if "ERROR" in l), tail[-1] if tail else "")
         if not any(s in err for s in ("not a bot", "reloaded", "format is not available", "403")):
             break
@@ -165,13 +169,18 @@ def client_args(client):
     return ["--extractor-args", f"youtube:player_client={client}"] if client else []
 
 
+CAPTION_LANGS = "en-orig,hi-orig,en,hi,en-US,en-GB"
+
+
 def fetch_captions(url, out, client=None):
     """Captions in a separate call; failure is fine (YouTube often rate-limits subtitles; Twitch has none)."""
     for old in out.glob("subs.*.json3"):
         old.unlink()
+    # Original-language tracks first, and --ignore-errors so one refused track (YouTube often answers
+    # "429 Too Many Requests" for machine translations) doesn't stop yt-dlp before the others.
     try:
-        subprocess.run(["yt-dlp", "--skip-download", "--write-subs", "--write-auto-subs", "--sub-langs",
-                        "en,en-orig,en-US,en-GB,hi,hi-orig", "--sub-format", "json3", "--no-playlist", "-o", str(out / "subs"),
+        subprocess.run(["yt-dlp", "--skip-download", "--write-subs", "--write-auto-subs", "--ignore-errors", "--sub-langs",
+                        CAPTION_LANGS, "--sub-format", "json3", "--no-playlist", "-o", str(out / "subs"),
                         *client_args(client), "--", url],
                        capture_output=True, timeout=180)
     except (OSError, subprocess.TimeoutExpired):
@@ -197,8 +206,10 @@ def fetch_captions(url, out, client=None):
 CONS = dict(zip("कखगघङचछजझञटठडढणतथदधनपफबभमयरलवशषसह\u0958\u0959\u095a\u095b\u095c\u095d\u095e\u095f",
                 "k kh g gh n ch chh j jh n t th d dh n t th d dh n p ph b bh m y r l v sh sh s h "
                 "q kh g z r rh f y".split()))
-VOWELS = dict(zip("अआइईउऊऋएऐओऔ", "a aa i ee u oo ri e ai o au".split()))
-MATRAS = dict(zip("ािीुूृेैोौ", "aa i ee u oo ri e ai o au".split()))
+# Short vowels for long ones, the way Hinglish is typed ("bhai", "kya", "nahin", not "bhaaee", "kyaa", "naheen"),
+# which is also how the Hindi words in HYPE are spelled.
+VOWELS = dict(zip("अआइईउऊऋएऐओऔ", "a a i i u u ri e ai o au".split()))
+MATRAS = dict(zip("ािीुूृेैोौ", "a i i u u ri e ai o au".split()))
 DIGITS = dict(zip("०१२३४५६७८९।", "0123456789."))
 
 
@@ -247,11 +258,18 @@ def json3_words(data, offset=0.0, dur=math.inf):
     return [(t, min(raw[i + 1][0] if i + 1 < len(raw) else math.inf, t + 1.0), w) for i, (t, w) in enumerate(raw)]
 
 
-def whisper_words(wav, out, say):
+def whisper_words(wav, out, say, lang=None):
+    """Words from local Whisper. `lang` is the video's language if the site said (e.g. "hi"), else None."""
     exe = shutil.which("whisper-cli")
     model = os.environ.get("KADAK_WHISPER_MODEL") or next(iter(sorted(Path.home().glob(".cache/whisper/ggml-*.bin"))), None)
     if not exe or not model:
         say("listen", 35, "No captions and no Whisper found, so clips will have no captions")
+        return []
+    english_only = bool(re.search(r"\.en[.-]", Path(model).name))  # ggml-base.en.bin, ggml-base.en-q5_1.bin
+    if english_only and lang and not lang.lower().startswith("en"):
+        # An English-only model turns other languages into made-up English: no captions beat wrong ones.
+        say("listen", 35, f"This video is in '{lang}' and only an English Whisper model is installed, "
+                          "so clips will have no captions")
         return []
 
     def on_line(line):
@@ -259,16 +277,30 @@ def whisper_words(wav, out, say):
         if m:
             say("listen", 32 + int(m.group(1)) * 10 // 100, f"Writing down the words ({m.group(1)}%)")
     # ponytail: Whisper runs at CPU/GPU speed of this Mac; a 3-hour stream takes a while with the base model.
-    stream([exe, "-m", str(model), "-f", str(wav), "-ml", "1", "-sow", "-oj", "-pp", "-of", str(out / "whisper")], on_line)
+    lang_args = [] if english_only else ["-l", lang.split("-")[0] if lang else "auto"]
+    stream([exe, "-m", str(model), "-f", str(wav), "-ml", "1", "-sow", "-oj", "-pp", *lang_args,
+            "-of", str(out / "whisper")], on_line)
     try:
         data = json.loads((out / "whisper.json").read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
         say("listen", 42, "Whisper couldn't write down the words, so clips will have no captions")
         return []
-    words = []
-    for seg in data.get("transcription", []):
-        w = clean_word(seg.get("text", ""))
-        if re.search(r"\w", w) and not w.startswith("["):
+    return whisper_json_words(data)
+
+
+def whisper_json_words(data):
+    """whisper-cli JSON (one word per segment) -> [(start, end, text)], without sound notes like "(upbeat music)"."""
+    segs = [(s, s.get("text", "").strip()) for s in data.get("transcription", [])]
+    words, skip_to = [], -1
+    for i, (seg, raw) in enumerate(segs):
+        if i <= skip_to:
+            continue
+        if raw.startswith(("(", "[", "*")):
+            # Drop the note up to its closing word if that comes within 6 words; an unclosed one is just this word.
+            skip_to = next((j for j in range(i, min(i + 6, len(segs))) if segs[j][1].endswith((")", "]", "*"))), i)
+            continue
+        w = clean_word(raw)
+        if re.search(r"\w", w):
             words.append((seg["offsets"]["from"] / 1000, seg["offsets"]["to"] / 1000, w))
     return words
 
@@ -434,7 +466,7 @@ def build_ass(words, start, end, y):
             "ScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, "
             "SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, "
             "Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-            "Style: Kadak,Anton,84,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,6,0,5,"
+            "Style: Kadak,Anton,100,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,7,0,5,"
             "60,60,0,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     ws = [w for w in words if start <= w[0] < end]
     groups = []
@@ -470,13 +502,15 @@ def video_filter(layout, face, W, H, ass_name):
 
 
 ENCODERS = [["-c:v", "h264_videotoolbox", "-b:v", "10M"], ["-c:v", "libx264", "-crf", "20", "-preset", "veryfast"]]
+# Every clip at the same loudness reels use (-14 LUFS), with peaks kept under -1.5 dB so nothing distorts.
+LOUDNESS = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
 
 def render(ffmpeg, src, seek, length, vf, out, name):
     while ENCODERS:
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{seek:.3f}", "-t", f"{length:.3f}",
                "-i", str(src), "-filter_complex", vf, "-map", "[v]", "-map", "0:a:0?", *ENCODERS[0],
-               "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", name]
+               "-af", LOUDNESS, "-ar", "48000", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", name]
         r = subprocess.run(cmd, cwd=out, capture_output=True, text=True)
         if r.returncode == 0:
             return
@@ -526,14 +560,14 @@ def _make_clips(source, out_dir, count, min_len, max_len, layout, section, progr
         say("download", 0, "Captions off: install ffmpeg-full")
     caps = None
     if is_url:
-        src, title, client = download(source.strip(), out, section, ffmpeg, say, emit)
+        src, title, client, lang = download(source.strip(), out, section, ffmpeg, say, emit)
         off = 0.0
         caps = fetch_captions(source.strip(), out, client)
     else:
         src = Path(source).expanduser()
         if not src.is_file():
             raise KadakError(f"Can't find the file {source}.")
-        title, off = src.stem, t0
+        title, off, lang = src.stem, t0, None
     emit({"title": title})
     full, W, H = probe(ffprobe, src)
     if not full:
@@ -555,7 +589,7 @@ def _make_clips(source, out_dir, count, min_len, max_len, layout, section, progr
     words = json3_words(caps, t0, dur) if caps else []
     if not words:
         say("listen", 32, "Writing down the words")
-        words = whisper_words(wav, out, say)
+        words = whisper_words(wav, out, say, lang)
     loud_db = rise(rms_per_second(ffmpeg, wav))
     shout_db = rise(rms_per_second(ffmpeg, wav, "highpass=f=2000,lowpass=f=4000,"))
     n = len(loud_db)

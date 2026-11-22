@@ -10,15 +10,31 @@ Clip your own videos, or creators who allow it (many streamers run clipping camp
 
 ## Install (Mac)
 
-You need Python 3.10 or newer, yt-dlp and an FFmpeg build that can burn captions (libass):
+You need [Homebrew](https://brew.sh). Then, in Terminal:
 
 ```bash
 brew install python yt-dlp ffmpeg-full
+git clone https://github.com/schuligan/kadak.git
+cd kadak
 ```
 
-Optional: `brew install whisper-cpp` and a Whisper model in `~/.cache/whisper/` (for example `ggml-base.en.bin`) to caption videos that have no captions of their own. Screen reading uses Apple's Vision framework through a small Swift helper, compiled on first run (needs the Xcode command line tools: `xcode-select --install`).
+`ffmpeg-full` matters: the plain `ffmpeg` formula can't burn captions, so Kadak would make clips without them.
 
-Windows and Linux: the same steps with your package manager. Screen reading is Mac-only for now; everything else works.
+Optional, for videos with no captions of their own (Twitch, your own files): local Whisper.
+
+```bash
+brew install whisper-cpp
+mkdir -p ~/.cache/whisper
+curl -L -o ~/.cache/whisper/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+```
+
+Screen reading (WASTED, MISSION PASSED…) uses Apple's Vision framework through a small Swift helper that Kadak builds on its first run. It needs the Xcode command line tools: `xcode-select --install`.
+
+Anything optional that's missing is skipped, and Kadak says so while it works.
+
+Keep yt-dlp current (`brew upgrade yt-dlp`): YouTube and Twitch change often, and an old yt-dlp is the usual reason a download fails.
+
+Windows and Linux: not tested yet. The same tools exist there (Python, yt-dlp, an FFmpeg with libass), but screen reading is Mac-only.
 
 ## Run
 
@@ -54,8 +70,10 @@ The best non-overlapping moments become clips, trimmed to pauses in speech. Each
 ## Limits
 
 - It downloads the whole video (or the part you choose) at up to 1080p. Use the part picker for multi-hour streams.
-- Whisper on a CPU is slow, and the small English model is weak on Hindi. YouTube's own captions are better when present.
-- Picking is a heuristic. It finds loud, energetic and on-screen-event moments, not guaranteed viral ones. Watch before you post.
+- YouTube's own captions are used first (Hindi comes out in English letters). Whisper is the fallback: with the English model (`ggml-base.en.bin`) Kadak leaves captions off on non-English videos rather than invent English. For Hindi Twitch streams or your own files, download the multilingual `ggml-base.bin` instead (same link, without `.en`).
+- Every clip's sound is evened out to the loudness reels use (-14 LUFS).
+- Picking is a heuristic. It finds loud, energetic and on-screen-event moments, not guaranteed viral ones. It can't tell a story cutscene from gameplay. Watch before you post.
+- Tested so far on one Apple Silicon Mac: YouTube streams in English and Hindi, a Twitch VOD, local files, and all three layouts. A 10-minute part takes about 2–11 minutes, mostly downloading.
 
 ## Tests
 
