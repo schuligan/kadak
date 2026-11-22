@@ -4,6 +4,10 @@ import kadak
 
 
 class TestKadak(unittest.TestCase):
+    def test_caption_markup_is_dropped(self):
+        words = [kadak.clean_word(t) for t in "] >> Oh my god. [Music] [ __ ] Rose".split()]
+        self.assertEqual([w for w in words if w], ["Oh", "my", "god.", "Rose"])
+
     def test_short_silent_video_gives_no_clip(self):
         self.assertEqual(kadak.pick_moments([0.0] * 10, [], 3, 20, 50), [])
         self.assertEqual(len(kadak.pick_moments([0.0] * 5 + [0.9] * 5, [], 3, 20, 50)), 1)

@@ -221,7 +221,10 @@ def translit(s):
 
 
 def clean_word(w):
-    w = w.replace("{", "").replace("}", "").replace("\\", "").strip()
+    # Drop caption markup: speaker changes (">>"), sound notes ("[Music]") and YouTube's bleep "[ __ ]".
+    if re.fullmatch(r"\s*(\[.*\]|>+|_+)\s*", w):
+        return ""
+    w = re.sub(r"[{}\\\[\]<>]", "", w).strip()
     return translit(w) if re.search("[ऀ-ॿ]", w) else w
 
 
