@@ -71,7 +71,7 @@ def parse_request(body):
         return None, "Tick the box to confirm you own the video or the creator allows clipping."
     try:
         count = int(req.get("count", 5))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         count = 5
     layout = req.get("layout") if req.get("layout") in LAYOUTS else "face"
     section = str(req.get("section") or "").replace(" ", "")

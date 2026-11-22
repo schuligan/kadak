@@ -17,6 +17,7 @@
   color-scheme:dark;
 }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{margin:0;background:var(--night);color:var(--text);font-family:var(--body)}
 a{color:var(--gold)} a:hover{color:#FFF1CC}
 button,input,select,summary{font:inherit}
@@ -252,8 +253,13 @@ function start(id) {
 }
 
 async function poll() {
-  let job;
-  try { job = await (await fetch(`/api/jobs/${jobId}`)).json(); } catch { return; }
+  let job, res;
+  try { res = await fetch(`/api/jobs/${jobId}`); job = await res.json(); } catch { return; }
+  if (!res.ok) {  // e.g. Kadak was restarted and forgot this job
+    clearInterval(timer);
+    show($("scan"), false); show($("form"), true);
+    return showError($("jobErr"), "Kadak lost track of that job (was it restarted?). Press Find clips to start again.");
+  }
   $("scanTitle").textContent = job.title ? `SCANNING “${job.title}”` : "GETTING THE VIDEO";
   $("pctText").textContent = `${job.pct || 0}%`;
   $("bar").style.width = `${job.pct || 0}%`;

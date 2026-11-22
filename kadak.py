@@ -4,6 +4,7 @@
 Fully local. Python stdlib + yt-dlp + FFmpeg; optional whisper-cli and swiftc (macOS Vision for screen text/faces).
 """
 import argparse
+import atexit
 import json
 import math
 import os
@@ -58,13 +59,26 @@ def stream(cmd, on_line=None, **kw):
     """Run cmd, feeding each output line (stdout+stderr, '\\r' counts as a line break) to on_line."""
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                          errors="replace", **kw)
+    RUNNING.add(p)
     tail = []
-    for line in p.stdout:
-        line = line.rstrip()
-        tail = (tail + [line])[-15:]
-        if on_line:
-            on_line(line)
-    return p.wait(), tail
+    try:
+        for line in p.stdout:
+            line = line.rstrip()
+            tail = (tail + [line])[-15:]
+            if on_line:
+                on_line(line)
+        return p.wait(), tail
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+        RUNNING.discard(p)
+
+
+# Long-running helpers (yt-dlp, Whisper, the Vision reader) are stopped when Kadak quits.
+# ponytail: short FFmpeg renders run with subprocess.run and can outlive a quit by a few seconds.
+RUNNING = set()
+atexit.register(lambda: [p.kill() for p in list(RUNNING)])
 
 
 def find_ffmpeg():
@@ -116,28 +130,46 @@ def download(url, out, section, ffmpeg, say):
         elif line.startswith("KADAK_TITLE "):
             title.append(line[12:])
     # ponytail: downloads the whole video (or the whole section); live streams must have ended.
-    cmd = ["yt-dlp", "-f", YTDLP_FORMAT, "--merge-output-format", "mp4", "--no-playlist", "--newline",
-           "--progress", "--no-simulate", "--print", "before_dl:KADAK_TITLE %(title)s",
-           "--ffmpeg-location", str(Path(ffmpeg).parent), "-o", str(out / "source.%(ext)s"), url]
-    if section:
-        cmd[1:1] = ["--download-sections", f"*{section}"]
-    code, tail = stream(cmd, on_line)
-    media = out / "source.mp4"
-    if not media.exists():
-        media = next((p for p in sorted(out.glob("source.*")) if p.suffix in (".mp4", ".mkv", ".webm")), None)
-    if code or not media:
+    # YouTube sometimes blocks a connection's default client ("confirm you're not a bot");
+    # other clients often still work, so try them in turn before giving up.
+    for client in YT_CLIENTS:
+        cmd = ["yt-dlp", "-f", YTDLP_FORMAT, "--merge-output-format", "mp4", "--no-playlist", "--newline", "--force-overwrites",
+               "--progress", "--no-simulate", "--print", "before_dl:KADAK_TITLE %(title)s",
+               "--ffmpeg-location", str(Path(ffmpeg).parent), "-o", str(out / "source.%(ext)s"), *client_args(client),
+               "--", url]
+        if section:
+            cmd[1:1] = ["--download-sections", f"*{section}"]
+        code, tail = stream(cmd, on_line)
+        media = out / "source.mp4"
+        if not media.exists():
+            media = next((p for p in sorted(out.glob("source.*")) if p.suffix in (".mp4", ".mkv", ".webm")), None)
+        if not code and media:
+            return media, (title[0] if title else media.stem), client
         err = next((l for l in reversed(tail) if "ERROR" in l), tail[-1] if tail else "")
-        raise KadakError(f"Couldn't download that link. Check it's a public video and try again. ({err})")
-    return media, (title[0] if title else media.stem)
+        if not any(s in err for s in ("not a bot", "reloaded", "format is not available", "403")):
+            break
+        say("download", 0, "YouTube blocked that request, trying another way")
+    if "not a bot" in err:
+        raise KadakError("YouTube asked this connection to prove it isn't a bot. Wait a few minutes and try "
+                         "again, or try another network (turning a VPN off often helps).")
+    raise KadakError(f"Couldn't download that link. Check it's a public video and try again. ({err[:200]})")
 
 
-def fetch_captions(url, out):
+YT_CLIENTS = [None, "mweb", "android_vr"]
+
+
+def client_args(client):
+    return ["--extractor-args", f"youtube:player_client={client}"] if client else []
+
+
+def fetch_captions(url, out, client=None):
     """Captions in a separate call; failure is fine (YouTube often rate-limits subtitles; Twitch has none)."""
     for old in out.glob("subs.*.json3"):
         old.unlink()
     try:
         subprocess.run(["yt-dlp", "--skip-download", "--write-subs", "--write-auto-subs", "--sub-langs",
-                        "en.*,en,hi", "--sub-format", "json3", "--no-playlist", "-o", str(out / "subs"), url],
+                        "en,en-orig,en-US,en-GB,hi,hi-orig", "--sub-format", "json3", "--no-playlist", "-o", str(out / "subs"),
+                        *client_args(client), "--", url],
                        capture_output=True, timeout=180)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -147,8 +179,11 @@ def fetch_captions(url, out):
             data = json.loads(f.read_text(encoding="utf-8", errors="replace"))
         except ValueError:
             continue
-        auto = any("acAsrConf" in s for e in data.get("events", []) for s in e.get("segs", []))
-        rank = (0 if f.name.split(".")[-2].startswith("en") else 1, auto)  # manual before auto, en before hi
+        # Speech-recognition tracks carry acAsrConf: they are what was actually said, word-timed.
+        # A track without it may be a machine translation (e.g. English of a Hindi stream), so it comes second.
+        # ponytail: this also ranks rare human-made captions below the ASR track.
+        asr = any("acAsrConf" in s for e in data.get("events", []) for s in e.get("segs", []))
+        rank = (not asr, not f.name.split(".")[-2].startswith("en"))
         if best is None or rank < best[0]:
             best = (rank, data)
     return best and best[1]
@@ -332,7 +367,8 @@ def pick_moments(scores, words, count, min_len, max_len, dur=None):
     if not scores:
         return []
     if dur < min_len:
-        return [(0.0, dur, max(range(len(scores)), key=scores.__getitem__))]
+        peak = max(range(len(scores)), key=scores.__getitem__)
+        return [(0.0, dur, peak)] if scores[peak] >= 0.15 else []
     L = (min_len + max_len) / 2
     gaps = [(a[1] + 0.2, b[0] - 0.2) for a, b in zip(words, words[1:]) if b[0] - a[1] >= 0.5]
     if words:
@@ -416,7 +452,7 @@ def video_filter(layout, face, W, H, ass_name):
     elif layout == "face":
         x, y, w, h = face
         v = (f"[0:v]split[a][b];[a]crop={w}:{h}:{x}:{y},scale=1080:640[top];"
-             f"[b]crop=min(iw\\,ih*1080/1280):ih,scale=1080:1280[bot];[top][bot]vstack")
+             f"[b]crop=min(iw\\,ih*1080/1280):min(ih\\,iw*1280/1080),scale=1080:1280[bot];[top][bot]vstack")
     else:
         v = ("[0:v]split[a][b];[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
              "boxblur=20:2[bg];[b]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
@@ -438,14 +474,31 @@ def render(ffmpeg, src, seek, length, vf, out, name):
         r = subprocess.run(cmd, cwd=out, capture_output=True, text=True)
         if r.returncode == 0:
             return
-        if len(ENCODERS) == 1:
+        if len(ENCODERS) == 1 or "videotoolbox" not in r.stderr.lower():
             raise KadakError(f"Couldn't make {name}. FFmpeg said: {r.stderr.strip()[-300:]}")
-        ENCODERS.pop(0)  # hardware encoder unavailable: use libx264 for the rest of this run
+        ENCODERS.pop(0)  # this Mac's hardware encoder failed: use libx264 from now on
 
 
 # ---------- the whole thing ----------
 
+WORK_FILES = ("source.*", "audio.wav", "whisper.*", "subs.*", "kadak_*.ass", "frames")
+
+
+def tidy(out):
+    """Remove the working files Kadak made (big source video, WAV, frames); keep the finished clips."""
+    for pattern in WORK_FILES:
+        for p in Path(out).glob(pattern):
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+
+
 def make_clips(source, out_dir, count=5, min_len=20, max_len=50, layout="face", section=None, progress=None):
+    try:
+        return _make_clips(source, out_dir, count, min_len, max_len, layout, section, progress)
+    finally:
+        tidy(Path(out_dir).resolve())
+
+
+def _make_clips(source, out_dir, count, min_len, max_len, layout, section, progress):
     emit = progress or (lambda e: None)
 
     def say(stage, pct, text):
@@ -467,9 +520,9 @@ def make_clips(source, out_dir, count=5, min_len=20, max_len=50, layout="face", 
         say("download", 0, "Captions off: install ffmpeg-full")
     caps = None
     if is_url:
-        src, title = download(source.strip(), out, section, ffmpeg, say)
+        src, title, client = download(source.strip(), out, section, ffmpeg, say)
         off = 0.0
-        caps = fetch_captions(source.strip(), out)
+        caps = fetch_captions(source.strip(), out, client)
     else:
         src = Path(source).expanduser()
         if not src.is_file():
@@ -477,6 +530,8 @@ def make_clips(source, out_dir, count=5, min_len=20, max_len=50, layout="face", 
         title, off = src.stem, t0
     emit({"title": title})
     full, W, H = probe(ffprobe, src)
+    if not full:
+        raise KadakError("Couldn't tell how long this video is. If it's a live stream, try again after it ends.")
     dur = full if is_url else (min(t1, full) if t1 else full) - off
     if dur <= 0:
         raise KadakError("The section starts after the end of the video.")

@@ -4,6 +4,25 @@ import kadak
 
 
 class TestKadak(unittest.TestCase):
+    def test_short_silent_video_gives_no_clip(self):
+        self.assertEqual(kadak.pick_moments([0.0] * 10, [], 3, 20, 50), [])
+        self.assertEqual(len(kadak.pick_moments([0.0] * 5 + [0.9] * 5, [], 3, 20, 50)), 1)
+
+    def test_face_layout_keeps_portrait_sources_unsquashed(self):
+        vf = kadak.video_filter("face", (0, 0, 540, 320), 1080, 1920, None)
+        self.assertIn(r"crop=min(iw\,ih*1080/1280):min(ih\,iw*1280/1080)", vf)
+
+    def test_tidy_keeps_clips_and_removes_work_files(self):
+        import tempfile
+        from pathlib import Path
+        d = Path(tempfile.mkdtemp())
+        for n in ("kadak_01.mp4", "source.mp4", "audio.wav", "whisper.json", "subs.en.json3", "kadak_01.ass", "notes.txt"):
+            (d / n).write_text("x")
+        (d / "frames").mkdir()
+        (d / "frames" / "f0001.jpg").write_text("x")
+        kadak.tidy(d)
+        self.assertEqual(sorted(p.name for p in d.iterdir()), ["kadak_01.mp4", "notes.txt"])
+
     def test_quiet_intro_is_not_a_loud_moment(self):
         db = [-60.0] * 5 + [-20.0] * 60
         self.assertEqual(kadak.rise(db)[5], 0.0)  # normal talk right after a silent intro
