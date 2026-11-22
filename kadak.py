@@ -243,9 +243,10 @@ def rms_per_second(ffmpeg, wav, band=""):
     return [max(-70.0, float(v)) if v not in ("-inf", "nan", "inf") else -70.0 for v in vals]
 
 
-def rise(db, window=120):
-    """dB above the rolling median of the previous `window` seconds (never negative)."""
-    return [max(0.0, v - statistics.median(db[max(0, i - window):i])) if i else 0.0 for i, v in enumerate(db)]
+def rise(db, window=120, warmup=30):
+    """dB above the rolling median of the previous `window` seconds (never negative).
+    The first `warmup` seconds share one baseline, so a quiet intro doesn't make ordinary talk look loud."""
+    return [max(0.0, v - statistics.median(db[max(0, i - window):max(i, min(warmup, len(db)))])) for i, v in enumerate(db)]
 
 
 def hype_hits(words, n):

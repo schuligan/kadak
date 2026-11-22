@@ -4,6 +4,11 @@ import kadak
 
 
 class TestKadak(unittest.TestCase):
+    def test_quiet_intro_is_not_a_loud_moment(self):
+        db = [-60.0] * 5 + [-20.0] * 60
+        self.assertEqual(kadak.rise(db)[5], 0.0)  # normal talk right after a silent intro
+        self.assertGreater(kadak.rise(db + [-5.0])[-1], 10)  # a real jump later still counts
+
     def test_json3_words_with_section_offset(self):
         data = {"events": [
             {"tStartMs": 0, "dDurationMs": 99999},
