@@ -125,7 +125,10 @@ class Handler(BaseHTTPRequestHandler):
                 chunk = f.read(min(1 << 20, left))
                 if not chunk:
                     break
-                self.wfile.write(chunk)
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return  # the browser stopped loading (normal for video previews); nothing to report
                 left -= len(chunk)
 
     def host_ok(self):

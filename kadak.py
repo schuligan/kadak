@@ -386,7 +386,9 @@ def frame_hits(texts, t, last):
     keyword within 20 s counts once."""
     joined, new = " | ".join(texts).upper(), []
     for kw in KEYWORDS:
-        if kw in joined:
+        # "FAILED" only as the whole line ("Failed" screen, "MISSION FAILED"), not "lol failed" in a chat overlay.
+        hit = any(re.fullmatch(r"\W*(MISSION\s+)?FAILED\W*", t.upper()) for t in texts) if kw == "FAILED" else kw in joined
+        if hit:
             if t - last.get(kw, -99) >= 20:
                 new.append((t, kw))
             last[kw] = t
@@ -466,6 +468,14 @@ def facecam(frames, W, H):
 
 # ---------- pick ----------
 
+def moment_scores(loud_db, shout_db, hype, screen, skip):
+    """Per-second scores, smoothed over 5 s. Sound counts for nothing on menus and cutscenes;
+    an on-screen word (WASTED, FAILED...) always counts."""
+    raw = [(0.0 if sk else 0.35 * min(1, l / 12) + 0.25 * min(1, sh / 12) + 0.25 * h) + sc
+           for l, sh, h, sc, sk in zip(loud_db, shout_db, hype, screen, skip)]
+    return [statistics.fmean(raw[max(0, i - 2):i + 3]) for i in range(len(raw))]
+
+
 def cut_points(scores, dull, p, n):
     """(start, end) around the peak second p: start in the calm before the action builds, end soon after
     the payoff: when things go quiet, or 3 s into a black or frozen screen (like a FAILED screen)."""
@@ -516,14 +526,16 @@ def pick_moments(scores, words, count, min_len, max_len, dur=None, dull=None):
         if any(s - 3 <= p <= e + 3 for s, e, _ in picked):
             continue
         start, end = cut_points(scores, dull, p, min(n, int(dur)))
-        if end - start > max_len:
-            start = end - max_len
+        if end - start > max_len:  # too long: less build-up, but keep the peak
+            start = max(start, min(end - max_len, p - 2))
+            end = min(end, start + max_len)
         if end - start < min_len:  # too short: more build-up first, then more after
             start = max(0.0, end - min_len)
             while start < p - 2 and dull[int(start)]:  # but don't open on a black, frozen or menu screen
                 start += 1
             end = min(dur, start + min_len)
-        start = snap(start, 0.0, max(0.0, min(p - 2, end - min_len)))
+            start = min(start, max(0.0, end - min_len))  # at the very end of the video, length wins
+        start = snap(start, max(0.0, end - max_len), max(0.0, min(p - 2, end - min_len)))
         end = snap(end, max(p + 1, start + min_len, end - 2), min(dur, start + max_len, end + 2))
         if any(start < e + 3 and end > s - 3 for s, e, _ in picked):
             continue
@@ -547,7 +559,8 @@ def sentences(words):
 
 def clip_title(words, peak):
     """A whole sentence said at (or nearest to) the peak, preferring ones of 3+ words; None if nobody spoke."""
-    near = [s for s in sentences(words) if s[0][0] <= peak + 4 and s[-1][1] >= peak - 6]
+    near = [s for s in sentences(words) if s[0][0] <= peak + 4 and s[-1][1] >= peak - 6
+            and any(re.search(r"\w", w) for _, _, w in s)]
     if not near:
         return None
     best = min(near, key=lambda s: (len(s) < 3, max(0.0, s[0][0] - peak, peak - s[-1][1])))
@@ -766,9 +779,7 @@ def _make_clips(source, out_dir, count, min_len, max_len, layout, section, progr
     # Menus and cutscenes aren't moments: they score nothing. Black or frozen screens cut a clip short.
     dull, skip = screen_flags(frame_texts, frame_thumbs)
     dull, skip = per_second(dull, n), per_second(skip, n, pad=2)
-    raw = [0.0 if skip[i] else 0.35 * min(1, loud_db[i] / 12) + 0.25 * min(1, shout_db[i] / 12) + 0.25 * hype[i]
-           + screen[i] for i in range(n)]
-    smooth = [statistics.fmean(raw[max(0, i - 2):i + 3]) for i in range(n)]
+    smooth = moment_scores(loud_db, shout_db, hype, screen, skip)
     picks = pick_moments(smooth, words, count, min_len, max_len, dur, [d or k for d, k in zip(dull, skip)])
     face = None
     if layout == "face":

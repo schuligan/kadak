@@ -156,6 +156,47 @@ class TestKadak(unittest.TestCase):
         self.assertGreaterEqual(s, 90)
         self.assertGreaterEqual(e - s, 20)
 
+    def test_clip_lengths_hold_everywhere(self):
+        import random
+        rnd = random.Random(7)
+        for _ in range(400):
+            n = rnd.randint(30, 300)
+            scores = [rnd.random() * 0.5 for _ in range(n)]
+            for _ in range(rnd.randint(1, 4)):
+                scores[rnd.randrange(n)] = 1.0
+            dull = [False] * n
+            for _ in range(rnd.randint(0, 3)):
+                a, k = rnd.randrange(n), rnd.randint(1, 25)
+                dull[a:a + k] = [True] * len(dull[a:a + k])
+            lo = rnd.choice([5, 10, 20])
+            hi = lo + rnd.choice([3, 5, 30])
+            picks = kadak.pick_moments(scores, [], 3, lo, hi, dull=dull)
+            for s, e, p in picks:
+                self.assertTrue(lo - 0.01 <= e - s <= hi + 0.01, (n, lo, hi, s, e, p))
+                self.assertTrue(s <= p <= e, (n, lo, hi, s, e, p))
+            spans = sorted((s, e) for s, e, _ in picks)
+            self.assertTrue(all(a[1] <= b[0] for a, b in zip(spans, spans[1:])))
+
+    def test_clip_near_the_end_after_a_menu_is_full_length(self):
+        scores = [0.4] * 200
+        scores[195] = 1.0
+        dull = [False] * 170 + [True] * 21 + [False] * 9
+        (s, e, _), = kadak.pick_moments(scores, [], 1, 20, 50, dull=dull)
+        self.assertGreaterEqual(e - s, 20)
+
+    def test_screen_word_counts_even_where_sound_is_skipped(self):
+        n = 10
+        sm = kadak.moment_scores([12.0] * n, [12.0] * n, [1.0] * n, [0.0] * 5 + [1.0] * 5, [True] * n)
+        self.assertEqual(sm[0], 0.0)
+        self.assertGreater(sm[7], 0.9)
+
+    def test_failed_only_counts_as_its_own_line(self):
+        self.assertEqual(kadak.keyword_hits([["lol failed again"], ["Delivery failed"]]), [])
+        self.assertEqual(kadak.keyword_hits([["MISSION FAILED"]]), [(0.0, "FAILED")])
+
+    def test_title_ignores_lone_punctuation(self):
+        self.assertIsNone(kadak.clip_title([(10, 10.3, "-")], 10))
+
     def test_clip_ends_when_it_goes_quiet(self):
         scores = [0.0] * 200
         scores[95:104] = [0.6] * 9
