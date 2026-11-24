@@ -17,7 +17,8 @@ from collections import Counter
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
-KEYWORDS = ["MISSION PASSED", "MISSION FAILED", "MISSION COMPLETE", "KNOCKED OUT",
+# "FAILED" on its own: GTA's fail screen says just "Failed" (in a stylised font) over the reason.
+KEYWORDS = ["MISSION PASSED", "MISSION COMPLETE", "FAILED", "KNOCKED OUT",
             "WASTED", "BUSTED", "ELIMINATED", "VICTORY"]
 HYPE = ["oh my god", "omg", "no no", "what the", "lets go", "run", "bro", "wasted", "busted", "police",
         "cops", "holy", "insane", "crazy", "wait what", "oh no", "bhaago", "bhago", "bhai", "arre", "kya",
@@ -34,8 +35,9 @@ class KadakError(Exception):
 # ---------- small helpers ----------
 
 def hms(t):
+    """Seconds -> H:MM:SS, the way YouTube and Twitch show times."""
     t = max(0, int(t))
-    return f"{t // 3600:02d}:{t % 3600 // 60:02d}:{t % 60:02d}"
+    return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}"
 
 
 def parse_time(s):
@@ -258,12 +260,39 @@ def json3_words(data, offset=0.0, dur=math.inf):
     return [(t, min(raw[i + 1][0] if i + 1 < len(raw) else math.inf, t + 1.0), w) for i, (t, w) in enumerate(raw)]
 
 
+def whisper_model():
+    return os.environ.get("KADAK_WHISPER_MODEL") or next(iter(sorted(Path.home().glob(".cache/whisper/ggml-*.bin"))), None)
+
+
+def setup_notes():
+    """Plain-English lines about anything missing, for the start of the web app. Empty when all is set up."""
+    notes = []
+    if not shutil.which("yt-dlp"):
+        notes.append("Missing yt-dlp, which downloads the videos. Install it with: brew install yt-dlp")
+    try:
+        if not find_ffmpeg()[2]:
+            notes.append("Your FFmpeg can't draw captions, so clips will have none. Fix: brew install ffmpeg-full")
+    except KadakError as e:
+        notes.append(str(e))
+    if not shutil.which("whisper-cli"):
+        notes.append("Optional: Whisper isn't installed, so Twitch clips will have no captions. "
+                     "See 'Install' in the README (brew install whisper-cpp, then one model file).")
+    elif not whisper_model():
+        notes.append("Optional: Whisper is installed but its model file isn't in ~/.cache/whisper, so Twitch clips "
+                     "will have no captions. The README shows the one-line download.")
+    if sys.platform == "darwin" and not (REPO / "bin" / "kadak-vision").exists() and not shutil.which("swiftc"):
+        notes.append("Optional: screen reading (WASTED, FAILED, facecam) needs Apple's command line tools: "
+                     "xcode-select --install")
+    return notes
+
+
 def whisper_words(wav, out, say, lang=None):
     """Words from local Whisper. `lang` is the video's language if the site said (e.g. "hi"), else None."""
-    exe = shutil.which("whisper-cli")
-    model = os.environ.get("KADAK_WHISPER_MODEL") or next(iter(sorted(Path.home().glob(".cache/whisper/ggml-*.bin"))), None)
+    exe, model = shutil.which("whisper-cli"), whisper_model()
     if not exe or not model:
-        say("listen", 35, "No captions and no Whisper found, so clips will have no captions")
+        fix = "brew install whisper-cpp" if not exe else "download a Whisper model file"
+        say("listen", 35, f"This video has no captions of its own and Whisper isn't set up, so clips will have "
+                          f"no captions. To fix it: {fix} (see Install in the README)")
         return []
     english_only = bool(re.search(r"\.en[.-]", Path(model).name))  # ggml-base.en.bin, ggml-base.en-q5_1.bin
     if english_only and lang and not lang.lower().startswith("en"):
@@ -369,6 +398,42 @@ def keyword_hits(frame_texts, step=2.0):
     return [h for i, texts in enumerate(frame_texts) for h in frame_hits(texts, i * step, last)]
 
 
+def screen_flags(frame_texts, frame_thumbs):
+    """Per frame: (dull, skip). dull = black or frozen screen; skip = not gameplay: a menu (lots of text)
+    or a cutscene (black bars top and bottom). Thumbs are 32x18 grey pixels, top row first."""
+    n = len(frame_thumbs)
+    counts = [len(t) for t in frame_texts]
+    many = max(10, statistics.median(counts) + 6) if counts else math.inf  # a chat overlay raises the median
+
+    def diff(a, b):
+        return sum(abs(x - y) for x, y in zip(a, b)) / 576 if len(a) == len(b) == 576 else 99
+
+    dull, bars = [], []
+    for i, th in enumerate(frame_thumbs):
+        if len(th) != 576:
+            dull.append(False)
+            bars.append(False)
+            continue
+        other = frame_thumbs[i - 1] if i else frame_thumbs[1] if n > 1 else []
+        dull.append(sum(th) / 576 <= 12 or diff(th, other) <= 2)
+        bars.append(statistics.median(th[:32]) <= 6 and statistics.median(th[-32:]) <= 20
+                    and sum(th[64:-64]) / 448 >= 20)
+    if sum(bars) > 0.6 * n:  # the stream itself has black bars, so they say nothing about cutscenes
+        bars = [False] * n
+    return dull, [b or c >= many for b, c in zip(bars, counts)]
+
+
+def per_second(flags, n, step=2.0, pad=0):
+    """Per-frame flags (one frame every `step` s) -> per-second flags, widened by `pad` seconds."""
+    out = [False] * n
+    for k, f in enumerate(flags):
+        if f:
+            for s in range(int(k * step) - pad, int((k + 1) * step) + pad):
+                if 0 <= s < n:
+                    out[s] = True
+    return out
+
+
 def facecam(frames, W, H):
     """Facecam region (x, y, w, h) in pixels, aspect 1080:640, or None. frames = per-frame lists of [x,y,w,h] 0..1."""
     boxes, counts = {}, Counter()
@@ -383,7 +448,9 @@ def facecam(frames, W, H):
     if not counts:
         return None
     (cell, n), = counts.most_common(1)
-    if n < 0.3 * len(frames):
+    # ponytail: a small webcam is only found in some frames, and menus or cutscenes can hide it for minutes,
+    # so 15% of frames (and at least 3) in one spot is enough.
+    if n < max(3, 0.15 * len(frames)):
         return None
     x, y, w, h = (statistics.median(b[i] for b in boxes[cell]) for i in range(4))
     cx, cy, bw, bh = (x + w / 2) * W, (y + h / 2) * H, w * W * 2.4, h * H * 2.4
@@ -399,40 +466,93 @@ def facecam(frames, W, H):
 
 # ---------- pick ----------
 
-def pick_moments(scores, words, count, min_len, max_len, dur=None):
-    """Greedy best-first windows [(start, end, peak)] over smoothed per-second scores."""
+def cut_points(scores, dull, p, n):
+    """(start, end) around the peak second p: start in the calm before the action builds, end soon after
+    the payoff: when things go quiet, or 3 s into a black or frozen screen (like a FAILED screen)."""
+    top = scores[p]
+    lo, hi = max(0, p - 25), max(0, p - 6)
+    # The calmest second 6-25 s before the peak (not on a black, frozen or menu screen);
+    # near-ties go to the one closest to 12 s before.
+    cands = [i for i in range(lo, hi + 1) if not dull[i]] or list(range(lo, hi + 1))
+    calm = min(cands, key=lambda i: (round(5 * scores[i] / top), abs(i - (p - 12))))
+    start = calm - 1 if calm and not dull[calm - 1] else calm
+    end, run = min(n, p + 20), None
+    for e in range(p, min(n, p + 20)):
+        run = (e if run is None else run) if dull[e] else None
+        if run is not None and e - run >= 2:
+            end = run + 3
+            break
+        if e >= p + 3 and all(v < 0.3 * top for v in scores[e:e + 2]):
+            end = e + 1.5
+            break
+    return float(start), float(min(end, n))
+
+
+def pick_moments(scores, words, count, min_len, max_len, dur=None, dull=None):
+    """Greedy best-first clips [(start, end, peak)] over smoothed per-second scores.
+    `dull` marks seconds of black, frozen or menu screen, which clips don't open on or linger on."""
     dur = len(scores) if dur is None else dur
     if not scores:
         return []
     if dur < min_len:
         peak = max(range(len(scores)), key=scores.__getitem__)
         return [(0.0, dur, peak)] if scores[peak] >= 0.15 else []
-    L = (min_len + max_len) / 2
+    n = len(scores)
+    dull = dull or [False] * n
     gaps = [(a[1] + 0.2, b[0] - 0.2) for a, b in zip(words, words[1:]) if b[0] - a[1] >= 0.5]
     if words:
         gaps = [(0.0, words[0][0] - 0.2)] * (words[0][0] >= 0.5) + gaps + [(words[-1][1] + 0.2, dur)]
 
     def snap(target, lo, hi):
+        """Move a cut into the nearest pause in speech (up to 3 s away), so no word is cut in half."""
         cands = [min(max(target, g0), g1) for g0, g1 in gaps]
         cands = [c for c in cands if abs(c - target) <= 3 and lo <= c <= hi]
         return min(cands, key=lambda c: abs(c - target)) if cands else target
 
     picked = []
-    for p in sorted(range(len(scores)), key=lambda i: -scores[i]):
+    for p in sorted(range(n), key=lambda i: -scores[i]):
         if len(picked) >= count or scores[p] < 0.15:
             break
         if any(s - 3 <= p <= e + 3 for s, e, _ in picked):
             continue
-        start = min(max(0.0, p + 0.5 - 0.6 * L), max(0.0, dur - L))
-        start = snap(start, 0.0, max(0.0, dur - min_len))
-        end = min(start + L, dur)
-        end = snap(end, start + min_len, min(start + max_len, dur))
-        if end - start < min_len:
+        start, end = cut_points(scores, dull, p, min(n, int(dur)))
+        if end - start > max_len:
+            start = end - max_len
+        if end - start < min_len:  # too short: more build-up first, then more after
             start = max(0.0, end - min_len)
+            while start < p - 2 and dull[int(start)]:  # but don't open on a black, frozen or menu screen
+                start += 1
+            end = min(dur, start + min_len)
+        start = snap(start, 0.0, max(0.0, min(p - 2, end - min_len)))
+        end = snap(end, max(p + 1, start + min_len, end - 2), min(dur, start + max_len, end + 2))
         if any(start < e + 3 and end > s - 3 for s, e, _ in picked):
             continue
         picked.append((round(start, 2), round(end, 2), p))
     return picked
+
+
+def sentences(words):
+    """Words -> sentences, split after . ! ? or at a pause of 0.6 s or more."""
+    out, cur = [], []
+    for w in words:
+        if cur and w[0] - cur[-1][1] >= 0.6:
+            out.append(cur)
+            cur = []
+        cur.append(w)
+        if re.search(r"[.!?…]$", w[2]):
+            out.append(cur)
+            cur = []
+    return out + [cur] * bool(cur)
+
+
+def clip_title(words, peak):
+    """A whole sentence said at (or nearest to) the peak, preferring ones of 3+ words; None if nobody spoke."""
+    near = [s for s in sentences(words) if s[0][0] <= peak + 4 and s[-1][1] >= peak - 6]
+    if not near:
+        return None
+    best = min(near, key=lambda s: (len(s) < 3, max(0.0, s[0][0] - peak, peak - s[-1][1])))
+    text = " ".join(w for _, _, w in best[:12]).rstrip(",;:-") + ("…" if len(best) > 12 else "")
+    return text[0].upper() + text[1:]
 
 
 def describe(start, end, peak, t0, hits, loud_db, shout_db, hype_per, words):
@@ -447,10 +567,8 @@ def describe(start, end, peak, t0, hits, loud_db, shout_db, hype_per, words):
     top = Counter(w for sec in hype_per[lo:hi] for w in sec).most_common(2)
     if top:
         why.append("hype words: " + ", ".join(w for w, _ in top))
-    near = sorted(sorted((w for w in words if abs(w[0] - peak) <= 4), key=lambda w: abs(w[0] - peak))[:8])
-    title = " ".join(w for _, _, w in near)
-    title = f"“{title[0].upper() + title[1:]}”" if title else f"Moment at {hms(t0 + peak)}"
-    return why, title
+    title = clip_title(words, peak)
+    return why, f"“{title}”" if title else f"Moment at {hms(t0 + peak)}"
 
 
 # ---------- render ----------
@@ -557,18 +675,19 @@ def _make_clips(source, out_dir, count, min_len, max_len, layout, section, progr
     # 1. download / open
     say("download", 0, "Downloading the video" if is_url else "Opening the video")
     if not has_ass:
-        say("download", 0, "Captions off: install ffmpeg-full")
+        say("download", 0, "This FFmpeg can't draw captions, so clips will have none. "
+                           "To fix it: brew install ffmpeg-full")
     caps = None
     if is_url:
         src, title, client, lang = download(source.strip(), out, section, ffmpeg, say, emit)
         off = 0.0
         caps = fetch_captions(source.strip(), out, client)
     else:
-        src = Path(source).expanduser()
+        src = Path(source).expanduser().resolve()  # clips render from inside the output folder
         if not src.is_file():
             raise KadakError(f"Can't find the file {source}.")
         title, off, lang = src.stem, t0, None
-    emit({"title": title})
+        emit({"title": title})
     full, W, H = probe(ffprobe, src)
     if not full:
         raise KadakError("Couldn't tell how long this video is. If it's a live stream, try again after it ends.")
@@ -601,7 +720,7 @@ def _make_clips(source, out_dir, count, min_len, max_len, layout, section, progr
 
     # 3. read the screen (macOS only, never fatal)
     say("read", 45, "Reading the screen")
-    frame_texts, frame_faces, hits = [], [], []
+    frame_texts, frame_faces, frame_thumbs, hits = [], [], [], []
     exe = vision_binary(say)
     if exe:
         frames = out / "frames"
@@ -623,6 +742,7 @@ def _make_clips(source, out_dir, count, min_len, max_len, layout, section, progr
                 return
             frame_texts.append(d.get("text", []))
             frame_faces.append(d.get("faces", []))
+            frame_thumbs.append(d.get("thumb", []))
             for t, kw in frame_hits(frame_texts[-1], (len(frame_texts) - 1) * 2.0, seen):
                 hits.append((t, kw))
                 emit({"found": {"at": hms(t0 + t), "what": f"{kw} on screen"}})
@@ -643,10 +763,13 @@ def _make_clips(source, out_dir, count, min_len, max_len, layout, section, progr
         for s in range(int(t) - 2, int(t) + 3):
             if 0 <= s < n:
                 screen[s] = 1.0
-    raw = [0.35 * min(1, loud_db[i] / 12) + 0.25 * min(1, shout_db[i] / 12) + 0.25 * hype[i] + screen[i]
-           for i in range(n)]
+    # Menus and cutscenes aren't moments: they score nothing. Black or frozen screens cut a clip short.
+    dull, skip = screen_flags(frame_texts, frame_thumbs)
+    dull, skip = per_second(dull, n), per_second(skip, n, pad=2)
+    raw = [0.0 if skip[i] else 0.35 * min(1, loud_db[i] / 12) + 0.25 * min(1, shout_db[i] / 12) + 0.25 * hype[i]
+           + screen[i] for i in range(n)]
     smooth = [statistics.fmean(raw[max(0, i - 2):i + 3]) for i in range(n)]
-    picks = pick_moments(smooth, words, count, min_len, max_len, dur)
+    picks = pick_moments(smooth, words, count, min_len, max_len, dur, [d or k for d, k in zip(dull, skip)])
     face = None
     if layout == "face":
         face = facecam(frame_faces, W, H)
@@ -673,8 +796,10 @@ def _make_clips(source, out_dir, count, min_len, max_len, layout, section, progr
             (out / ass).write_text(build_ass(words, start, end, 720 if layout == "face" else 1350), encoding="utf-8")
         render(ffmpeg, src, off + start, end - start, video_filter(layout, face, W, H, ass), out, name)
         d = round(end - start)
-        clip = {"file": name, "start": round(off + start, 2), "end": round(off + end, 2), "at": hms(t0 + start),
-                "dur": f"{d // 60}:{d % 60:02d}", "title": ttl, "why": why}
+        # start/end/from/to are times in the whole source video, whether or not a part was downloaded.
+        clip = {"file": name, "start": round(t0 + start, 2), "end": round(t0 + end, 2), "at": hms(t0 + start),
+                "from": hms(t0 + start), "to": hms(t0 + end), "dur": f"{d // 60}:{d % 60:02d}", "title": ttl,
+                "why": why}
         clips.append(clip)
         emit({"clip": clip})
     say("done", 100, f"Made {len(clips)} clips")
@@ -698,7 +823,8 @@ def main():
         elif "found" in e:
             print(f"       found {e['found']['at']}  {e['found']['what']}", flush=True)
         elif "clip" in e:
-            print(f"       made {e['clip']['file']}  {e['clip']['title']}", flush=True)
+            c = e["clip"]
+            print(f"       made {c['file']}  {c['from']}-{c['to']} in the video  {c['title']}", flush=True)
         elif "title" in e:
             print(f"       title: {e['title']}", flush=True)
     try:

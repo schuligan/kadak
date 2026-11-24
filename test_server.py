@@ -22,7 +22,7 @@ def make_clips(source, out_dir, count=5, min_len=20, max_len=50, layout="face", 
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "kadak_01.mp4"), "wb") as f:
         f.write(b"0123456789")
-    clip = {"file": "kadak_01.mp4", "start": 0.0, "end": 30.0, "at": "00:00:10", "dur": "0:30", "title": "“Test”", "why": ["voice +9 dB"]}
+    clip = {"file": "kadak_01.mp4", "start": 0.0, "end": 30.0, "at": "0:00:10", "from": "0:00:10", "to": "0:00:40", "dur": "0:30", "title": "“Test”", "why": ["voice +9 dB"]}
     progress({"title": "Test video"})
     progress({"found": {"at": "00:00:10", "what": "WASTED on screen"}})
     progress({"clip": clip})

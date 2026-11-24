@@ -126,9 +126,91 @@ class TestKadak(unittest.TestCase):
     def test_pick_snaps_to_word_gap(self):
         scores = [0.0] * 200
         scores[100] = 1.0
-        words = [(t / 2, t / 2 + 0.4, "w") for t in range(0, 400) if not 150 <= t < 156]  # gap 75.0..78.0
+        words = [(t / 2, t / 2 + 0.4, "w") for t in range(0, 400) if not 162 <= t < 166]  # pause 81.1..82.8
         (s, e, _), = kadak.pick_moments(scores, words, 1, 20, 50)
-        self.assertTrue(74.9 <= s <= 78.0, s)
+        self.assertTrue(81.1 <= s <= 82.8, s)
+
+    def test_clip_starts_in_the_calm_before_the_action(self):
+        scores = [0.4] * 200
+        scores[84:87] = [0.0] * 3  # a quiet moment, then the action builds to a peak at 100
+        scores[100] = 1.0
+        (s, e, p), = kadak.pick_moments(scores, [], 1, 20, 50)
+        self.assertEqual(p, 100)
+        self.assertTrue(83 <= s <= 86, s)
+
+    def test_clip_ends_soon_into_a_black_screen(self):
+        scores = [0.4] * 200
+        scores[100] = 1.0
+        dull = [False] * 104 + [True] * 12 + [False] * 84  # e.g. a 12 s black FAILED screen after the crash
+        (s, e, _), = kadak.pick_moments(scores, [], 1, 20, 50, dull=dull)
+        self.assertTrue(104 <= e <= 107.5, e)
+        self.assertGreaterEqual(e - s, 20)
+
+    def test_clip_does_not_open_on_a_menu(self):
+        scores = [0.0] * 200
+        scores[95:104] = [0.6] * 9
+        scores[100] = 1.0
+        dull = [False] * 200
+        dull[80:90] = [True] * 10  # a settings menu just before the action
+        (s, e, _), = kadak.pick_moments(scores, [], 1, 20, 50, dull=dull)
+        self.assertGreaterEqual(s, 90)
+        self.assertGreaterEqual(e - s, 20)
+
+    def test_clip_ends_when_it_goes_quiet(self):
+        scores = [0.0] * 200
+        scores[95:104] = [0.6] * 9
+        scores[100] = 1.0
+        (s, e, _), = kadak.pick_moments(scores, [], 1, 10, 50)
+        self.assertTrue(104 <= e <= 107, e)
+
+    def test_title_is_a_whole_sentence_near_the_peak(self):
+        text = "What are you talking about? The type of the truck is insane. Okay."
+        words = [(i * 0.4, i * 0.4 + 0.3, w) for i, w in enumerate(text.split())]
+        self.assertEqual(kadak.clip_title(words, 3.0), "The type of the truck is insane.")
+        self.assertEqual(kadak.clip_title(words, 0.5), "What are you talking about?")
+        self.assertIsNone(kadak.clip_title(words, 60))
+        long = [(i * 0.3, i * 0.3 + 0.2, "word") for i in range(30)]
+        self.assertEqual(kadak.clip_title(long, 4), "Word " + "word " * 10 + "word…")
+
+    def test_times_are_h_mm_ss(self):
+        self.assertEqual(kadak.hms(4290.7), "1:11:30")
+        self.assertEqual(kadak.hms(65), "0:01:05")
+
+    def test_failed_screen_counts(self):
+        frames = [["FaiLed", "THE PLANE WAS DESTROYED."], ["FaiLed"]] + [[]] * 20 + [["FAILED"]]
+        self.assertEqual(kadak.keyword_hits(frames), [(0.0, "FAILED"), (44.0, "FAILED")])
+
+    def test_screen_flags(self):
+        game = [60 + (i * 7) % 90 for i in range(576)]
+        moved = [v + 20 for v in game]
+        black = [3] * 576
+        bars = [2] * 64 + [90] * 448 + [2] * 64  # cutscene
+        texts = [["HUD"]] * 6 + [["SETTINGS"] + ["option"] * 15] + [[]] * 3
+        thumbs = [game, moved, black, black, bars, game, moved, game, moved, []]
+        dull, skip = kadak.screen_flags(texts, thumbs)
+        self.assertEqual(dull, [False, False, True, True, False, False, False, False, False, False])
+        self.assertEqual(skip, [False, False, False, False, True, False, True, False, False, False])
+        self.assertEqual(kadak.screen_flags([[]] * 3, [game, game, moved])[0], [True, True, False])  # frozen
+        all_bars = kadak.screen_flags([[]] * 4, [bars, bars[:64] + [99] * 448 + bars[-64:], bars, bars])[1]
+        self.assertEqual(all_bars, [False] * 4)  # bars on every frame are the stream's layout, not cutscenes
+        self.assertEqual(kadak.per_second([False, True, False], 6, pad=1), [False, True, True, True, True, False])
+
+    def test_setup_notes_say_how_to_fix_missing_tools(self):
+        with mock.patch.object(kadak.shutil, "which", return_value=None), \
+                mock.patch.object(kadak, "find_ffmpeg", side_effect=kadak.KadakError("FFmpeg is not installed. x")):
+            notes = " ".join(kadak.setup_notes())
+        for fix in ("brew install yt-dlp", "FFmpeg is not installed", "brew install whisper-cpp"):
+            self.assertIn(fix, notes)
+        with mock.patch.object(kadak.shutil, "which", return_value="/x/tool"), \
+                mock.patch.object(kadak, "find_ffmpeg", return_value=("f", "p", True)), \
+                mock.patch.object(kadak, "whisper_model", return_value="/x/m.bin"):
+            self.assertEqual(kadak.setup_notes(), [])
+
+    def test_small_facecam_hidden_by_menus_is_still_found(self):
+        cam = [[0.04, 0.27, 0.03, 0.07]]
+        frames = [cam if i % 5 == 0 else [] for i in range(100)]  # seen in 20% of frames
+        x, y, w, h = kadak.facecam(frames, 1920, 1080)
+        self.assertLess(x + w / 2, 1920 * 0.3)
 
     def test_build_ass(self):
         words = [(12.5, 13.0, "bhaago"), (13.0, 13.4, "police"), (15.0, 15.5, "aa")]

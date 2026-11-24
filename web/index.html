@@ -201,7 +201,8 @@ h2{margin:0;font:400 38px var(--display);letter-spacing:.02em;text-transform:upp
   <h2>How it works</h2>
   <ul>
     <li>It listens for sudden loud moments and shouting, and for hype words like "no no no", "let's go" or "bhaago".</li>
-    <li>On a Mac it also reads the screen for words like WASTED, BUSTED or MISSION PASSED.</li>
+    <li>On a Mac it also reads the screen for words like WASTED, BUSTED, FAILED or MISSION PASSED, and skips menus and cutscenes.</li>
+    <li>Each clip starts as the action builds and ends soon after the payoff. Its card shows where it sits in the original video.</li>
     <li>Each clip tells you why it was picked, so you decide what to post.</li>
     <li>Everything runs on this computer. No account, no upload, no AI service, no tracking.</li>
     <li>Only clip videos you own or that the creator allows (many streamers run clipping campaigns). Respect their rules and the platform's.</li>
@@ -301,8 +302,9 @@ function addCard(c, i) {
   card.innerHTML = `<video controls muted playsinline preload="metadata"></video><h3></h3><p><b></b> · <span></span></p><a class="go btn" download>Download MP4</a>`;
   card.querySelector("video").src = src;
   card.querySelector("h3").textContent = c.title;
-  card.querySelector("b").textContent = c.at;
-  card.querySelector("p span").textContent = `${c.dur} · ${(c.why || []).join(", ") || "loud moment"}`;
+  card.querySelector("b").textContent = c.from && c.to ? `${c.from} – ${c.to}` : c.at;
+  card.querySelector("b").title = "Where this clip is in the original video";
+  card.querySelector("p span").textContent = `${c.dur} long · ${(c.why || []).join(", ") || "loud moment"}`;
   card.querySelector("a").href = `${src}?dl=1`;
   $("grid").append(card);
 }

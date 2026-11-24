@@ -178,9 +178,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     url = f"http://127.0.0.1:{PORT}"
-    print(f"Kadak is running at {url}  (press Ctrl+C to stop)")
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError:
+        raise SystemExit(f"Kadak couldn't start: port {PORT} is busy, so it may already be running. "
+                         f"Open {url} in your browser, or close the other copy and try again.")
+    for note in kadak.setup_notes():
+        print(note, flush=True)
+    print(f"Kadak is running at {url}  (press Ctrl+C to stop)", flush=True)
     if not os.environ.get("KADAK_NO_BROWSER"):
         webbrowser.open(url)
     try:
